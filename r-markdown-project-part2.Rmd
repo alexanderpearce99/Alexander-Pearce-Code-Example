@@ -1,0 +1,211 @@
+---
+title: "r-markdown-project-part2"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(rtweet)
+library(lubridate)
+library(tidytext)
+library(ggplot2)
+library(textrecipes)
+library(tidymodels)
+set.seed(3)
+```
+
+```{r}
+d = read_csv("../data/GolfClubsProject.csv")
+d
+```
+
+```{r}
+nrc_lexicon = get_sentiments("nrc")
+nrc_lexicon
+```
+
+```{r}
+d1 = d %>% unnest_tokens(word, text)  %>% 
+  anti_join(stop_words, by="word")
+d1
+```
+```{r}
+d2 = d1 %>% inner_join(nrc_lexicon, by="word") %>% 
+  count(status_id,sentiment) %>% 
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0)
+d2
+```
+
+```{r}
+d3 = d %>% left_join(d2, by="status_id")
+d3[is.na(d3)] = 0
+d3
+```
+
+```{r}
+focal_words = d1 %>% filter(str_detect(word,"^[a-z]+$")) %>% group_by(word) %>% count() %>% filter(n > 150)
+focal_words 
+d4 = d1 %>% inner_join(focal_words, by="word") %>% count(word,status_id,screen_name) %>% 
+bind_tf_idf(word,status_id,n) %>% select(word, screen_name,status_id, tf_idf) %>% arrange(desc(tf_idf))
+d4
+d4 %>% top_n(100) %>% 
+  ggplot(aes(x=word, y=tf_idf, fill=screen_name))+geom_col()+facet_wrap(~screen_name, scales ="free")+coord_flip()
+```
+
+```{r}
+write_csv(d1 %>% count(screen_name,word) %>% filter(str_detect(word,"^[a-z]+$")) %>% filter(n > 100), "../data/wordcloudproject.csv")
+```
+
+```{r}
+write_csv(d3, "../data/GolfClubsProjectpart2.csv")
+```
+
+```{r}
+t = read_csv("../data/GolfClubsProjectpart2.csv")
+t
+```
+
+```{r}
+data_split  = initial_split(t,prop = 4/5)
+train_set = training(data_split)
+test_set = testing(data_split)
+train_set
+```
+
+```{r}
+basic = recipe(retweet_count ~ screen_name + display_text_width + is_retweet + followers_count + anticipation + joy + positive + trust + negative + sadness + anger + fear + surprise + disgust + text, train_set) %>%
+  step_dummy(screen_name) %>%
+ step_tokenize(text) %>%
+ step_stopwords(text) %>% 
+   step_tokenfilter(text, max_tokens = 100) %>% 
+  step_tfidf(text) 
+basic %>% prep %>% juice
+```
+```{r}
+interaction_recipe = basic %>% step_interact(terms = ~joy:positive + anger:negative + anticipation:surprise)
+interaction_recipe %>% prep %>% juice
+```
+
+```{r}
+lm_reg = linear_reg() %>% 
+  set_engine("lm") %>% 
+  set_mode("regression") 
+
+xgboost_reg = boost_tree() %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+rf_reg = rand_forest() %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+bw = workflow() %>% add_model(lm_reg) %>% add_recipe(basic)
+
+evalRegression = function(curWorkflow){
+  c = curWorkflow %>% fit(data=train_set)
+  p1 = predict(c, test_set) %>% 
+  bind_cols(test_set %>% select(retweet_count))
+  t1 = p1 %>% mae(.pred, retweet_count)
+  t2 = p1 %>% rmse(.pred, retweet_count)
+  return(bind_rows(t1,t2))
+}
+
+r1 = bw %>% evalRegression %>% mutate(model = "lm", recipe = "basic")
+r2 = bw %>%  update_model(xgboost_reg) %>% 
+  evalRegression %>% mutate(model = "xgboost", recipe = "basic")
+r3 = bw %>%  update_model(rf_reg) %>% 
+  evalRegression %>% mutate(model = "ranger", recipe = "basic")
+r4 = bw %>%  update_recipe(interaction_recipe) %>% update_model(lm_reg) %>%
+  evalRegression %>% mutate(model = "lm", recipe = "interaction")
+r5 = bw %>%  update_model(xgboost_reg) %>% update_recipe(interaction_recipe) %>%
+  evalRegression %>% mutate(model = "xgboost", recipe = "interaction")
+r6 = bw %>%  update_model(rf_reg) %>% update_recipe(interaction_recipe) %>%
+  evalRegression %>% mutate(model = "ranger", recipe = "interaction")
+b = bind_rows(r1,r2,r3,r4,r5,r6)
+b
+```
+
+```{r}
+b %>% ggplot(aes(x = model,y = .estimate, fill = recipe))+
+  geom_col(position="dodge")+facet_wrap(~.metric)
+```
+
+
+
+```{r}
+basic_recipe2 = recipe(retweet_count ~ screen_name + display_text_width + is_retweet + followers_count + anticipation + joy + positive + trust + negative + sadness + anger + fear + surprise + disgust, train_set) %>% step_dummy(screen_name)
+basic_recipe2 %>% prep %>% juice
+```
+```{r}
+lm_reg = linear_reg() %>% 
+  set_engine("lm") %>% 
+  set_mode("regression") 
+
+xgboost_reg = boost_tree() %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+rf_reg = rand_forest() %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+```
+
+```{r}
+bw2 = workflow() %>% add_model(lm_reg) %>% add_recipe(basic_recipe2)
+```
+
+
+```{r}
+evalRegression = function(curWorkflow){
+  c = curWorkflow %>% fit(data=train_set)
+  p1 = predict(c, test_set) %>% 
+  bind_cols(test_set %>% select(retweet_count))
+  t1 = p1 %>% mae(.pred, retweet_count)
+  t2 = p1 %>% rmse(.pred, retweet_count)
+  return(bind_rows(t1,t2))
+}
+```
+
+```{r}
+r1 = bw2 %>% evalRegression %>% mutate(model = "lm", recipe = "basic")
+r2 = bw2 %>%  update_model(xgboost_reg) %>% 
+  evalRegression %>% mutate(model = "xgboost", recipe = "basic")
+r3 = bw2 %>%  update_model(rf_reg) %>% 
+  evalRegression %>% mutate(model = "ranger", recipe = "basic")
+b2 = bind_rows(r1,r2,r3)
+b2
+```
+
+```{r}
+basic3 = recipe(retweet_count ~ screen_name + display_text_width + is_retweet + followers_count +  text, train_set) %>%
+  step_dummy(screen_name) %>%
+ step_tokenize(text) %>%
+ step_stopwords(text) %>% 
+   step_tokenfilter(text, max_tokens = 100) %>% 
+  step_tfidf(text) 
+basic3 %>% prep %>% juice
+```
+```{r}
+bw3 = workflow() %>% add_model(lm_reg) %>% add_recipe(basic3)
+```
+```{r}
+evalRegression = function(curWorkflow){
+  c = curWorkflow %>% fit(data=train_set)
+  p1 = predict(c, test_set) %>% 
+  bind_cols(test_set %>% select(retweet_count))
+  t1 = p1 %>% mae(.pred, retweet_count)
+  t2 = p1 %>% rmse(.pred, retweet_count)
+  return(bind_rows(t1,t2))
+}
+```
+
+```{r}
+r1 = bw3 %>% evalRegression %>% mutate(model = "lm", recipe = "basic")
+r2 = bw3 %>%  update_model(xgboost_reg) %>% 
+  evalRegression %>% mutate(model = "xgboost", recipe = "basic")
+r3 = bw3 %>%  update_model(rf_reg) %>% 
+  evalRegression %>% mutate(model = "ranger", recipe = "basic")
+b3 = bind_rows(r1,r2,r3)
+b3
+```
+
